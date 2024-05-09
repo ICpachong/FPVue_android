@@ -7,20 +7,14 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.res.AssetManager;
-import android.graphics.Color;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
-import android.view.SurfaceView;
 import android.view.View;
 import android.view.WindowManager;
-import android.widget.AdapterView;
-import android.widget.ArrayAdapter;
-import android.widget.TextView;
 
-import androidx.annotation.RequiresApi;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.geehe.fpvue.databinding.ActivityVideoBinding;
@@ -45,10 +39,8 @@ import java.util.TimerTask;
 
 // Most basic implementation of an activity that uses VideoNative to stream a video
 // Into an Android Surface View
-public class VideoActivity extends AppCompatActivity implements IVideoParamsChanged, AdapterView.OnItemSelectedListener, WfbNGStatsChanged, MavlinkUpdate {
+public class VideoActivity extends AppCompatActivity implements IVideoParamsChanged, WfbNGStatsChanged, MavlinkUpdate, SettingsChanged {
     private ActivityVideoBinding binding;
-    protected SurfaceView surfaceView;
-    private TextView textViewStatistics;
     protected DecodingInfo mDecodingInfo;
     int lastVideoW=0,lastVideoH=0;
 
@@ -59,10 +51,15 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     static UsbDevice lastUsbDevice;
     WfbNgLink wfbLink;
     Thread wfbThread;
-    boolean selectionInit = false;
     boolean permissionRefused = false;
 
-    private Timer mavlinkTimer;
+    VideoPlayer videoPlayerH264;
+    VideoPlayer videoPlayerH265;
+
+    private PopUpSettings popUpSettings;
+
+    private String activeCodec;
+    private int activeChannel;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -71,25 +68,33 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         binding = ActivityVideoBinding.inflate(getLayoutInflater());
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
+        popUpSettings = new PopUpSettings(this.binding.svH265, this.getPreferences(Context.MODE_PRIVATE), this);
+        binding.btnSettings.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                popUpSettings.showPopupWindow();
+            }
+        });
+
         // Setup video player
         setContentView(binding.getRoot());
-        surfaceView=binding.svVideo;
-        VideoPlayer videoPlayer = new VideoPlayer(this);
-        videoPlayer.setIVideoParamsChanged(this);
-        surfaceView.getHolder().addCallback(videoPlayer.configure1());
+        videoPlayerH264 = new VideoPlayer(this);
+        videoPlayerH264.setIVideoParamsChanged(this);
+        binding.svH264.getHolder().addCallback(videoPlayerH264.configure1());
 
-        // Setup mavlink
+         videoPlayerH265 = new VideoPlayer(this);
+         videoPlayerH265.setIVideoParamsChanged(this);
+         binding.svH265.getHolder().addCallback(videoPlayerH265.configure1());
+
+         // Setup mavlink
         MavlinkNative.nativeStart(this);
-        mavlinkTimer=new Timer();
+        Timer mavlinkTimer = new Timer();
         mavlinkTimer.schedule(new TimerTask() {
             @Override
             public void run() {
                 MavlinkNative.nativeCallBack(VideoActivity.this);
             }
         },0,1000);
-
-        // Build channel selector
-        binding.spinner.setOnItemSelectedListener(this);
 
         copyGSKey();
 
@@ -123,41 +128,52 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
     protected void onStop() {
         MavlinkNative.nativeStop(this);
-        unregisterReceiver(usbReceiver);
+        try {
+            unregisterReceiver(usbReceiver);
+        } catch(java.lang.IllegalArgumentException ignored) {}
         Log.d(TAG, "onStop");
         StopWfbNg();
         super.onStop();
     }
 
     protected void onResume() {
-        SharedPreferences sharedPref =this.getPreferences(Context.MODE_PRIVATE);
-        int wifiChannel = sharedPref.getInt("wifi-channel", 11);
-        ArrayAdapter<String> channelAdapter = (ArrayAdapter<String>)binding.spinner.getAdapter();
-        int pos = channelAdapter.getPosition(wifiChannel+"");
-        if( pos > 0) {
-            binding.spinner.setSelection(pos);
-            Log.d(TAG, "Restored preference channel " + wifiChannel);
-        }
-
-        Log.d(TAG, "onResume StartWfbNg");
+        Log.d(TAG, "onResume StartWfbNg, StartVideoPlayer");
+        StartVideoPlayer();
         StartWfbNg();
         super.onResume();
     }
 
     @Override
-    public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-        ((TextView) parent.getChildAt(0)).setTextColor(Color.WHITE);
-        String value = (String) parent.getItemAtPosition(position);
-        if (parent == binding.spinner) {
-            SharedPreferences sharedPref = this.getPreferences(Context.MODE_PRIVATE);
-            SharedPreferences.Editor editor = sharedPref.edit();
-            editor.putInt("wifi-channel",  Integer.parseInt(value));
-            editor.apply();
-            if(selectionInit) {
-                StartWfbNg();
-            }
-            selectionInit=true;
+    public void onChannelSettingChanged(int channel) {
+        if (activeChannel == channel) {
+            return;
         }
+        StartWfbNg();
+    }
+
+    @Override
+    public void onCodecSettingChanged(String codec) {
+        if (codec.equals(activeCodec)) {
+            return;
+        }
+        StartVideoPlayer();
+    }
+
+    public synchronized void StartVideoPlayer() {
+        videoPlayerH264.stop();
+        videoPlayerH265.stop();
+        SharedPreferences sharedPref = this.getPreferences(Context.MODE_PRIVATE);
+        String codec = sharedPref.getString("codec", "h265");
+        if (codec.equals("h265")) {
+            videoPlayerH265.start(codec);
+            binding.svH264.setVisibility(View.INVISIBLE);
+            binding.svH265.setVisibility(View.VISIBLE);
+        } else {
+            videoPlayerH264.start(codec);
+            binding.svH265.setVisibility(View.INVISIBLE);
+            binding.svH264.setVisibility(View.VISIBLE);
+        }
+        activeCodec=codec;
     }
 
     public synchronized void StartWfbNg(){
@@ -202,6 +218,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             wfbLink = new WfbNgLink(VideoActivity.this, usbManager, lastUsbDevice.getDeviceName());
             Log.d(TAG, "wfb-ng link started.");
             wfbLink.SetWfbNGStatsChanged(VideoActivity.this);
+            activeChannel = wifiChannel;
             wfbThread = new Thread() {
                 @Override
                 public void run() {
@@ -238,27 +255,19 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     @Override
     public void onDecodingInfoChanged(final DecodingInfo decodingInfo) {
         mDecodingInfo=decodingInfo;
-        binding.tvMessage.setVisibility(View.INVISIBLE);
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
+                binding.tvMessage.setVisibility(View.INVISIBLE);
                 if (decodingInfo.currentKiloBitsPerSecond > 1000) {
-                    binding.tvVideoInfo.setText(String.format("%dx%d   %.0f fps   %.2f MB/s   %.1f ms",lastVideoW, lastVideoH, decodingInfo.currentFPS, decodingInfo.currentKiloBitsPerSecond/1000, decodingInfo.avgTotalDecodingTime_ms));
+                    binding.tvVideoInfo.setText(String.format("%dx%d@%.0f   %.1f Mbps   %.1f ms",lastVideoW, lastVideoH, decodingInfo.currentFPS, decodingInfo.currentKiloBitsPerSecond/1000, decodingInfo.avgTotalDecodingTime_ms));
                 } else {
-                    binding.tvVideoInfo.setText(String.format("%dx%d   %.0f fps   %.1f KB/s   %.1f ms",lastVideoW, lastVideoH, decodingInfo.currentFPS, decodingInfo.currentKiloBitsPerSecond, decodingInfo.avgTotalDecodingTime_ms));
+                    binding.tvVideoInfo.setText(String.format("%dx%d@%.0f   %.1f Kpbs   %.1f ms",lastVideoW, lastVideoH, decodingInfo.currentFPS, decodingInfo.currentKiloBitsPerSecond, decodingInfo.avgTotalDecodingTime_ms));
                 }
             }
         });
     }
 
-
-    @Override
-    public void onNothingSelected(AdapterView<?> parent) {}
-
-    private int count_p_dec_err = 0;
-    private int count_p_lost = 0;
-    private int count_p_fec_recovered = 0;
-    private int count_p_outgoing = 0;
     @Override
     public void onWfbNgStatsChanged(WfbNGStats data) {
         binding.tvMessage.setVisibility(View.INVISIBLE);
@@ -267,22 +276,18 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             @Override
             public void run() {
                 if (data.count_p_all > 0) {
-                    int perr = data.count_p_dec_err - count_p_dec_err;
+                    int perr = data.count_p_dec_err;
                     if (perr > 0) {
                         binding.tvWFBNGStatus.setText("Waiting for session key.");
                     } else {
                         binding.tvWFBNGStatus.setText(String.format("lost=%d\t\trec=%d\t\tok=%d",
-                                data.count_p_lost - count_p_lost,
-                                data.count_p_fec_recovered - count_p_fec_recovered,
-                                data.count_p_outgoing - count_p_outgoing));
+                                data.count_p_lost,
+                                data.count_p_fec_recovered ,
+                                data.count_p_outgoing));
                     }
                 } else {
                     binding.tvWFBNGStatus.setText("No wfb-ng data.");
                 }
-                count_p_dec_err = data.count_p_dec_err;
-                count_p_lost = data.count_p_lost;
-                count_p_fec_recovered = data.count_p_fec_recovered;
-                count_p_outgoing = data.count_p_outgoing;
             }
         });
     }
@@ -341,9 +346,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
+                Log.d("va", "data.telemetryArm="+data.telemetryArm);
                 binding.tvTelembattery.setText(formatDouble(data.telemetryBattery/1000.0,"V", ""));
-                binding.tvTelemCurr.setText(formatFloat(data.telemetryCurrent,"A",""));
-                binding.tvTelemCurrCons.setText(formatFloat(data.telemetryCurrentConsumed,"A",""));
+                binding.tvTelemCurr.setText(formatDouble(data.telemetryCurrent/1000.0,"A",""));
+                binding.tvTelemCurrCons.setText(formatDouble(data.telemetryCurrentConsumed/1000.0,"A",""));
                 binding.tvTelemAltitude.setText(formatFloat(data.telemetryAltitude,"m","ALT:"));
                 binding.tvTelemDistance.setText(formatDouble(data.telemetryDistance,"m","DST:"));
                 binding.tvTelemgspeed.setText(formatFloat(data.telemetryGspeed,"m/s","GSPD:"));

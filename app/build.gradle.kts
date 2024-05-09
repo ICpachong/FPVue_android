@@ -25,11 +25,13 @@ android {
             )
             ndk {
                 abiFilters.add("arm64-v8a")
+                abiFilters.add("armeabi-v7a")
             }
         }
         debug {
             ndk {
                 abiFilters.add("arm64-v8a")
+                abiFilters.add("armeabi-v7a")
             }
         }
     }
@@ -49,10 +51,12 @@ dependencies {
     implementation(project(":app:wfbngrtl8812"))
     implementation(libs.ui.graphics.android)
     implementation(project(":app:mavlink"))
+    implementation(libs.cardview)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.ext.junit)
     androidTestImplementation(libs.espresso.core)
+
 
     implementation(project(":app:videonative"))
 }
